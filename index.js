@@ -17,14 +17,14 @@ function initify(target) {
 		.catch(console.error))
 }
 
-function initFromFile(path, stat) {
+function initFromFile(location, stat) {
 	let pack = cpio.pack({format:'newc'})
-	stat.name = path
+	stat.name = path.basename(location)
 	stat.uid = 0
 	stat.gid = 0
 	pack.directory({name:'sbin', mode:0o555})
-	pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\nrequire('${path}')\n`)
-	pump(fs.createReadStream(path), pack.entry(stat), err=>err||pack.finalize())
+	pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\nrequire('/${stat.name}')\n`)
+	pump(fs.createReadStream(location), pack.entry(stat), err=>err||pack.finalize())
 	return Promise.resolve(pack)
 }
 
