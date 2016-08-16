@@ -4,9 +4,13 @@ const cpio = require('cpio-stream')
 const zlib = require('zlib')
 const fs = require('mz/fs')
 const exec = require('child_process').exec
-const walk = require('walk')
+const walk = require('findit')
 const path = require('path')
 const pump = require('pump')
+const Queue = require('push-queue')
+const debug = require('debug')('nos-init')
+
+debug("Running nos-init")
 
 function initify(target) {
 	return (fs.stat(target)
@@ -14,7 +18,7 @@ function initify(target) {
 			initFromFile(target, stat):
 			initFromModule(target))
 		.then(init=>init.pipe(zlib.createGzip()))
-		.catch(console.error))
+		.catch(e=>debug('initify', e)))
 }
 
 function initFromFile(location, stat) {
@@ -23,32 +27,49 @@ function initFromFile(location, stat) {
 	stat.uid = 0
 	stat.gid = 0
 	pack.directory({name:'sbin', mode:0o555})
-	pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\nrequire('/${stat.name}')\n`)
+	pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\ntry{require('/${stat.name}')}catch(e){console.log(e);require('repl').start()}\n`)
 	pump(fs.createReadStream(location), pack.entry(stat), err=>err||pack.finalize())
-	return Promise.resolve(pack)
+	return pack
 }
 
-function initFromModule(path) {
-	let mod = new Module(path)
+function initFromModule(location) {
+	let mod = new Module(location)
 	let pack = cpio.pack({format:'newc'})
-	let entry = mod.entry()
+	let entrypoint = mod.entry()
 	let setup = mod.install().then(()=>mod.build())
-	let header = Promise.all([entry, setup])
-		.then(([entry])=>{
+	let header = Promise.all([entrypoint, setup])
+		.then(([entrypoint])=>{
 			pack.directory({name:'sbin', mode:0o555})
-			pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\nrequire('${entry}')\n`)})
-	return (header
-		.then(()=>mod.walk(
-			(stat, stream)=>stat?
-				new Promise((res, rej)=>{
-					stat.uid = 0
-					stat.gid = 0
-					let entry = pack.entry(stat, res)
-					pump(stream, entry)
-				}).catch(err=>console.error("error",err)):
-				pack.finalize()
-		))
-		.then(()=>pack))
+			pack.directory({name:mod.name, mode:0o555})
+			pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\ntry{require('${entrypoint}')}catch(e){console.log(e);require('repl').start()}\n`)})
+
+	header.then(()=>{
+		mod.walk( (data, next)=>{
+			if (!data)
+				return pack.finalize()
+
+			let [stat, streamcb] = data
+			let nextcb = err=>{
+				if (!err) return next()
+				debug('next', err)
+			}
+
+			stat.uid = 0
+			stat.gid = 0
+			let relativePath = path.relative(location, stat.name)
+			let newPath = mod.name + path.resolve('/', relativePath)
+			stat.name = newPath
+			let entry = pack.entry(stat, nextcb)
+
+			if (streamcb) {
+				let stream = streamcb()
+				stream.on('error', e=>debug('error in stream', e))
+				pump(stream, entry)
+			}
+		})
+	}).catch(e=>debug('walk', e))
+
+	return pack
 }
 
 function run(cmd, dir) {
@@ -67,6 +88,10 @@ class Module {
 		if (!this.path.endsWith('/')) this.path = this.path + '/'
 		this.config = fs.readFile(`${this.path}package.json`, 'utf8')
 			.then(d=>JSON.parse(d))
+			.then(config=>{
+				this.name = config.name
+				return config
+			})
 	}
 
 	install() {
@@ -87,24 +112,30 @@ class Module {
 				.then(exists=>exists?path:this.path + 'server.js'))
 			.then(path=>fs.exists(path)
 				.then(exists=>exists?path:this.path + 'index.js')))
+			.then(location=>path.resolve('/', this.name, path.relative(this.path, location)))
 	}
 
 	walk(cb) {
-		const walker = walk.walk(this.path)
-		walker.on('file', (root, stats, next)=>{
-			stats.name = this.path + path.relative(this.path, path.resolve(root, stats.name))
-			cb(stats, fs.createReadStream(stats.name))
-			.then(next)
+		let push = Queue(cb)
+		const walker = walk(this.path)
+		walker.on('directory', (dir, stat)=>{
+			stat.name = dir
+			push([stat, null])
 		})
-		walker.on('end', cb)
-		return Promise.resolve()
+		walker.on('file', (file, stat)=>{
+			debug('file', file)
+			stat.name = file
+			push([stat, ()=>fs.createReadStream(file)])
+		})
+		walker.on('end', ()=>push(null, null))
+		walker.on('error', e=>debug('walker', e))
 	}
 }
 
 if (require.main === module) {
 	let target = process.argv[2]
 	target = target || './'
-	initify(target).then(init=>init.pipe(process.stdout))
+	initify(target).then(init=>init.pipe(process.stdout)).catch(e=>debug('main', e))
 } else {
 	module.exports = initify
 }
