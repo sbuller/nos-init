@@ -40,7 +40,6 @@ function initFromModule(location) {
 	let header = Promise.all([entrypoint, setup])
 		.then(([entrypoint])=>{
 			pack.directory({name:'sbin', mode:0o555})
-			pack.directory({name:mod.name, mode:0o555})
 			pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\ntry{require('${entrypoint}')}catch(e){console.log(e);require('repl').start()}\n`)})
 
 	header.then(()=>{
@@ -58,7 +57,12 @@ function initFromModule(location) {
 			stat.gid = 0
 			let relativePath = path.relative(location, stat.name)
 			let newPath = mod.name + path.resolve('/', relativePath)
-			stat.name = newPath
+
+			// newPath ends up with a trailing '/' when relativePath is empty
+			if (relativePath === '')
+				stat.name = mod.name
+			else
+				stat.name = newPath
 			let entry = pack.entry(stat, nextcb)
 
 			if (streamcb) {
