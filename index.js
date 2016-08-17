@@ -43,15 +43,16 @@ function initFromModule(location) {
 			pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\ntry{require('${entrypoint}')}catch(e){console.log(e);require('repl').start()}\n`)})
 
 	header.then(()=>{
-		mod.walk( (data, next)=>{
-			if (!data)
+		mod.walk( (stat, next)=>{
+			if (!stat)
 				return pack.finalize()
 
-			let [stat, streamcb] = data
+			debug('dequeued %s', stat.name)
 			let nextcb = err=>{
 				if (!err) return next()
 				debug('next', err)
 			}
+
 
 			stat.uid = 0
 			stat.gid = 0
@@ -64,10 +65,10 @@ function initFromModule(location) {
 			else
 				stat.name = newPath
 
-			let entry = pack.entry(stat, nextcb)
+			let entry = pack.entry(stat, stat.linkDest, nextcb)
 
-			if (streamcb) {
-				let stream = streamcb()
+			if (stat.streamCB) {
+				let stream = stat.streamCB()
 				stream.on('error', e=>debug('error in stream', e))
 				pump(stream, entry)
 			}
@@ -85,6 +86,20 @@ function run(cmd, dir) {
 		child.on('error', rej)
 		child.on('exit', code=>code===0?res():rej(code))
 	}).then(()=>dir?process.chdir(cwd):undefined)
+}
+
+function cleanupCounter(fn) {
+	let counter = 1
+	return {
+		wait: function() {
+			counter++
+		},
+		resume: function() {
+			if (--counter === 0) {
+				fn()
+			}
+		}
+	}
 }
 
 class Module {
@@ -123,17 +138,35 @@ class Module {
 	walk(cb) {
 		let push = Queue(cb)
 		const walker = walk(this.path)
+
+		let cleanup = cleanupCounter(()=>push(null))
 		walker.on('directory', (dir, stat)=>{
+			debug('directory', dir)
 			stat.name = dir
 			stat.size = 0
-			push([stat, null])
+			push(stat)
 		})
 		walker.on('file', (file, stat)=>{
 			debug('file', file)
 			stat.name = file
-			push([stat, ()=>fs.createReadStream(file)])
+			stat.streamCB = ()=>fs.createReadStream(file)
+			push(stat)
 		})
-		walker.on('end', ()=>push(null, null))
+		walker.on('link', (file, stat)=>{
+			debug('symlink', file)
+			stat.name = file
+			cleanup.wait()
+			fs.readlink(file, (err, dest)=>{
+				debug('sym %s, err: %s', stat && stat.name, err)
+				stat.linkDest = dest
+				push(stat)
+				cleanup.resume()
+			})
+		})
+		walker.on('end', ()=>{
+			debug('all files read')
+			cleanup.resume()
+		})
 		walker.on('error', e=>debug('walker', e))
 	}
 }
