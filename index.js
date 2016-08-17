@@ -63,6 +63,7 @@ function initFromModule(location) {
 				stat.name = mod.name
 			else
 				stat.name = newPath
+
 			let entry = pack.entry(stat, nextcb)
 
 			if (streamcb) {
@@ -124,6 +125,7 @@ class Module {
 		const walker = walk(this.path)
 		walker.on('directory', (dir, stat)=>{
 			stat.name = dir
+			stat.size = 0
 			push([stat, null])
 		})
 		walker.on('file', (file, stat)=>{
