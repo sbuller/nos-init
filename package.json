@@ -1,14 +1,9 @@
 {
   "name": "nos-init",
   "version": "1.0.0",
-  "description": "Build an initramfs file from a node module for nodeos.",
+  "description": "Build an initramfs file from a Node.js module for NodeOS",
   "main": "index.js",
-  "scripts": {
-    "test": "node test.js"
-  },
-  "bin": {
-    "nos-init": "./index.js"
-  },
+  "bin": "server.js",
   "author": "",
   "license": "ISC",
   "dependencies": {
