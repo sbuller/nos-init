@@ -7,14 +7,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "cpio-stream": "git+https://github.com/sbuller/cpio-stream.git",
-    "debug": "^2.2.0",
-    "findit": "^2.0.0",
-    "mz": "^2.4.0",
-    "pump": "^1.0.1",
-    "push-queue": "^0.1.1"
-  },
-  "devDependencies": {
-    "tape": "^4.6.0"
+    "cpio-fs": "^1.1.0",
+    "fs-extra-async": "0.0.6",
+    "tmp-promise": "^1.0.2"
   }
 }

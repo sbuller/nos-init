@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 
-const debug = require('debug')('nos-init')
-
 const initify = require('.')
 
 
@@ -11,4 +9,4 @@ debug("Running nos-init")
 
 initify(target)
 .then(init => init.pipe(process.stdout))
-.catch(e => debug('main', e))
+.catch(e => throw e)
