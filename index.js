@@ -28,14 +28,12 @@ function mapHeader(header)
 
 function initify(target)
 {
-  return withDir({unsafeCleanup: true})
-  .then(function(o)
+  return withDir(function(o)
   {
     let tmpPath = o.path
 
     return Promise.all(
     [
-      run("npm install -g jocker", tmpPath),
       jockerAsSbin(tmpPath),
       installModule(target, tmpPath)
     ])
@@ -49,7 +47,11 @@ function initify(target)
 
 function jockerAsSbin(tmpPath)
 {
-  return fs.mkdirAsync(resolve(tmpPath, 'sbin'), 0o100)
+  return run(`npm_config_prefix='${tmpPath}' npm install -g jocker`)
+  .then(function()
+  {
+    return fs.mkdirAsync(resolve(tmpPath, 'sbin'), 0o700)
+  })
   .then(function()
   {
     return fs.symlinkAsync('../bin/jocker', resolve(tmpPath, 'sbin/init'))
@@ -109,7 +111,7 @@ function initFromNpm(target, installPath)
 {
   let config = require(resolve(target, 'package.json'))
 
-  return run(`npm install -g ${target}`, installPath)
+  return run(`npm_config_prefix='${installPath}' npm install -g ${target}`)
   .then(entry(target, installPath, config))
 }
 
@@ -154,7 +156,7 @@ function entry(target, installPath, config)
     let main = config.main
     if(main)
     {
-      let path = `lib/node_modules/${moduleName}/${main}`
+      path = `lib/node_modules/${moduleName}/${main}`
       if(fs.isDirectorySync(resolve(installPath, path)))
         return fs.symlinkAsync(path+`/index.js`, initPath)
 
@@ -162,7 +164,7 @@ function entry(target, installPath, config)
     }
 
     // Default `main` fields (`index.js` file)
-    let path = `lib/node_modules/${moduleName}/index.js`
+    path = `lib/node_modules/${moduleName}/index.js`
     if(fs.accessSync(resolve(installPath, path), fs.constants.X_OK))
       return fs.symlinkAsync(path, initPath)
 
@@ -192,9 +194,6 @@ function npmStart(start, initPath)
 }
 
 function run(cmd, dir) {
-  let cwd = process.cwd()
-  dir = resolve(cwd, dir)
-
   return new Promise((res, rej)=>{
     exec(`cd ${dir}; ${cmd}`)
     .on('error', rej)
