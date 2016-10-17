@@ -1,25 +1,14 @@
 {
   "name": "nos-init",
   "version": "1.0.0",
-  "description": "Build an initramfs file from a node module for nodeos.",
+  "description": "Build an initramfs file from a Node.js module for NodeOS",
   "main": "index.js",
-  "scripts": {
-    "test": "node test.js"
-  },
-  "bin": {
-    "nos-init": "./index.js"
-  },
+  "bin": "server.js",
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "cpio-stream": "git+https://github.com/sbuller/cpio-stream.git",
-    "debug": "^2.2.0",
-    "findit": "^2.0.0",
-    "mz": "^2.4.0",
-    "pump": "^1.0.1",
-    "push-queue": "^0.1.1"
-  },
-  "devDependencies": {
-    "tape": "^4.6.0"
+    "cpio-fs": "^1.1.0",
+    "fs-extra-async": "0.0.6",
+    "tmp-promise": "piranna/tmp-promise#patch-1"
   }
 }

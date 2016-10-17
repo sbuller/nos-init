@@ -1,180 +1,205 @@
 #!/bin/env node
 
-const cpio = require('cpio-stream')
-const zlib = require('zlib')
-const fs = require('mz/fs')
+const createGzip = require('zlib').createGzip
 const exec = require('child_process').exec
-const walk = require('findit')
-const path = require('path')
-const pump = require('pump')
-const Queue = require('push-queue')
-const debug = require('debug')('nos-init')
+const resolve = require('path').resolve
 
-debug("Running nos-init")
+const pack = require('cpio-fs').pack
+const fs = require('fs-extra-async')
+const withDir = require('tmp-promise').withDir
 
-function initify(target) {
-	return (fs.stat(target)
-		.then(stat=>stat.isFile()?
-			initFromFile(target, stat):
-			initFromModule(target))
-		.then(init=>init.pipe(zlib.createGzip()))
-		.catch(e=>debug('initify', e)))
+
+function mapHeader(header)
+{
+  if(header.name.split('/')[0] === 'tmp')
+  {
+    header.uid = 1
+    header.gid = 1
+  }
+  else
+  {
+    header.uid = 0
+    header.gid = 0
+  }
+
+  return header
 }
 
-function initFromFile(location, stat) {
-	let pack = cpio.pack({format:'newc'})
-	stat.name = path.basename(location)
-	stat.uid = 0
-	stat.gid = 0
-	pack.directory({name:'sbin', mode:0o555})
-	pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\ntry{require('/${stat.name}')}catch(e){console.log(e);require('repl').start()}\n`)
-	pump(fs.createReadStream(location), pack.entry(stat), err=>err||pack.finalize())
-	return pack
+
+function initify(target)
+{
+  return withDir(function(o)
+  {
+    let tmpPath = o.path
+
+    return Promise.all(
+    [
+      jockerAsSbin(tmpPath),
+      installModule(target, tmpPath)
+    ])
+    .then(function()
+    {
+      return pack(tmpPath, {format: 'newc', map: mapHeader}).pipe(createGzip())
+    })
+  })
 }
 
-function initFromModule(location) {
-	let mod = new Module(location)
-	let pack = cpio.pack({format:'newc'})
-	let entrypoint = mod.entry()
-	let setup = mod.install().then(()=>mod.build())
-	let header = Promise.all([entrypoint, setup])
-		.then(([entrypoint])=>{
-			pack.directory({name:'sbin', mode:0o555})
-			pack.file({name:'sbin/init', mode:0o555}, `#!/bin/node\n\ntry{require('${entrypoint}')}catch(e){console.log(e);require('repl').start()}\n`)})
 
-	header.then(()=>{
-		mod.walk( (stat, next)=>{
-			if (!stat)
-				return pack.finalize()
+function jockerAsSbin(tmpPath)
+{
+  return run(`npm_config_prefix='${tmpPath}' npm install -g jocker`)
+  .then(function()
+  {
+    return fs.mkdirAsync(resolve(tmpPath, 'sbin'), 0o700)
+  })
+  .then(function()
+  {
+    return fs.symlinkAsync('../bin/jocker', resolve(tmpPath, 'sbin/init'))
+  })
+}
 
-			debug('dequeued %s', stat.name)
-			let nextcb = err=>{
-				if (!err) return next()
-				debug('next', err)
-			}
+function installModule(target, tmpPath)
+{
+  let installPath = resolve(tmpPath, 'tmp')
+
+  return fs.mkdirAsync(tmpPath, 0o500)
+  .then(function()
+  {
+    return fs.statAsync(target)
+  })
+  .then(function(stat)
+  {
+    return stat.isFile() ? initFromFile : initFromModule
+  },
+  function(error)
+  {
+    return initFromNpm
+  })
+  .then(function(installer)
+  {
+    return installer(target, installPath)
+  })
+}
 
 
-			stat.uid = 0
-			stat.gid = 0
-			let relativePath = path.relative(location, stat.name)
-			let newPath = mod.name + path.resolve('/', relativePath)
+function initFromFile(target, installPath)
+{
+  let options = {preserveTimestamps: true}
 
-			// newPath ends up with a trailing '/' when relativePath is empty
-			if (relativePath === '')
-				stat.name = mod.name
-			else
-				stat.name = newPath
+  return fs.copyAsync(target, resolve(installPath, 'init'), options)
+}
 
-			let entry = pack.entry(stat, stat.linkDest, nextcb)
+function initFromModule(target, installPath) {
+  let config = require(resolve(target, 'package.json'))
 
-			if (stat.streamCB) {
-				let stream = stat.streamCB()
-				stream.on('error', e=>debug('error in stream', e))
-				pump(stream, entry)
-			}
-		})
-	}).catch(e=>debug('walk', e))
+  return run("npm install", target)
+  .then(function()
+  {
+    if(config.scripts && config.scripts.build)
+      return run("npm run build", target)
+  })
+  .then(function()
+  {
+    let options = {preserveTimestamps: true}
 
-	return pack
+    return fs.copyAsync(target, installPath, options)
+  })
+  .then(entry(target, installPath, config))
+}
+
+function initFromNpm(target, installPath)
+{
+  let config = require(resolve(target, 'package.json'))
+
+  return run(`npm_config_prefix='${installPath}' npm install -g ${target}`)
+  .then(entry(target, installPath, config))
+}
+
+
+function entry(target, installPath, config)
+{
+  return function()
+  {
+    let initPath = resolve(installPath, 'init')
+    let moduleName = config.name
+
+    // Single binary
+    if(config.bin)
+    {
+      if(typeof config.bin === 'string')
+        return fs.symlinkAsync(`bin/${moduleName}`, initPath)
+
+      let binKeys = Object.keys(config.bin)
+      if(binKeys.length === 1)
+        return fs.symlinkAsync(`bin/${binKeys[0]}`, initPath)
+    }
+
+		// It doesn't make too much sense to have defined a `npm start` entry and
+		// not a binary besides being able to launch other ones defined on the npm
+		// path, but who knows...
+
+    // Explicit `npm start` command
+    let scripts = config.scripts
+    if(scripts && scripts.start) return npmStart(scripts.start, initPath)
+
+    // Default `npm start` command (`server.js` file)
+    let path = `lib/node_modules/${moduleName}/server.js`
+    if(fs.accessSync(resolve(installPath, path), fs.constants.X_OK))
+      return npmStart(path, initPath)
+
+    // Next entries are malformed because the `main` field nor the `index.js`
+    // file should be used as binaries and package maintainers should fix them
+    // and use the standard `npm start` command or its default `server.js` file,
+    // but we check them too to have a wider compatibility
+
+    // Explicit `main` fields
+    let main = config.main
+    if(main)
+    {
+      path = `lib/node_modules/${moduleName}/${main}`
+      if(fs.isDirectorySync(resolve(installPath, path)))
+        return fs.symlinkAsync(path+`/index.js`, initPath)
+
+      return fs.symlinkAsync(path, initPath)
+    }
+
+    // Default `main` fields (`index.js` file)
+    path = `lib/node_modules/${moduleName}/index.js`
+    if(fs.accessSync(resolve(installPath, path), fs.constants.X_OK))
+      return fs.symlinkAsync(path, initPath)
+
+    // Valid command not found on the package, we can't be able to create an
+    // auto-bootable `initramfs` image, abort the build process
+    throw ValueError('Valid command not found on the package')
+  }
+}
+
+function npmStart(start, initPath)
+{
+  return fs.readFileAsync(`${__dirname}/resources/npmStart.js`, 'utf8')
+  .then(function(data)
+  {
+    let npmStart_path =
+    [
+      `/lib/node_modules/${moduleName}/node_modules/.bin`,
+      '/lib/node_modules/.bin'
+    ].join(':')
+
+    return fs.writeFileAsync(initPath, eval('`'+data+'`'))
+  })
+  .then(function()
+  {
+    return fs.chmodAsync(initPath, 0x500)
+  })
 }
 
 function run(cmd, dir) {
-	let cwd = process.cwd()
-	dir = path.resolve(cwd, dir)
-	return new Promise((res, rej)=>{
-		let child = exec(`cd ${dir}; ${cmd}`)
-		child.on('error', rej)
-		child.on('exit', code=>code===0?res():rej(code))
-	}).then(()=>dir?process.chdir(cwd):undefined)
+  return new Promise((res, rej)=>{
+    exec(`cd ${dir}; ${cmd}`)
+    .on('error', rej)
+    .on('exit', code=>code ? rej(code) : res())
+  })
 }
 
-function cleanupCounter(fn) {
-	let counter = 1
-	return {
-		wait: function() {
-			counter++
-		},
-		resume: function() {
-			if (--counter === 0) {
-				fn()
-			}
-		}
-	}
-}
 
-class Module {
-	constructor(path) {
-		this.path = path
-		if (!this.path.endsWith('/')) this.path = this.path + '/'
-		this.config = fs.readFile(`${this.path}package.json`, 'utf8')
-			.then(d=>JSON.parse(d))
-			.then(config=>{
-				this.name = config.name
-				return config
-			})
-	}
-
-	install() {
-		return run("npm install", this.path)
-	}
-
-	build() {
-		return this.config.then(c=>{
-			const b = c.scripts && c.scripts.build
-			return b?run("npm run build", this.path):Promise.resolve()
-		})
-	}
-
-	entry() {
-		return (this.config
-			.then(c=>this.path + c.main, ()=>'')
-			.then(path=>fs.exists(path)
-				.then(exists=>exists?path:this.path + 'server.js'))
-			.then(path=>fs.exists(path)
-				.then(exists=>exists?path:this.path + 'index.js')))
-			.then(location=>path.resolve('/', this.name, path.relative(this.path, location)))
-	}
-
-	walk(cb) {
-		let push = Queue(cb)
-		const walker = walk(this.path)
-
-		let cleanup = cleanupCounter(()=>push(null))
-		walker.on('directory', (dir, stat)=>{
-			debug('directory', dir)
-			stat.name = dir
-			stat.size = 0
-			push(stat)
-		})
-		walker.on('file', (file, stat)=>{
-			debug('file', file)
-			stat.name = file
-			stat.streamCB = ()=>fs.createReadStream(file)
-			push(stat)
-		})
-		walker.on('link', (file, stat)=>{
-			debug('symlink', file)
-			stat.name = file
-			cleanup.wait()
-			fs.readlink(file, (err, dest)=>{
-				debug('sym %s, err: %s', stat && stat.name, err)
-				stat.linkDest = dest
-				push(stat)
-				cleanup.resume()
-			})
-		})
-		walker.on('end', ()=>{
-			debug('all files read')
-			cleanup.resume()
-		})
-		walker.on('error', e=>debug('walker', e))
-	}
-}
-
-if (require.main === module) {
-	let target = process.argv[2]
-	target = target || './'
-	initify(target).then(init=>init.pipe(process.stdout)).catch(e=>debug('main', e))
-} else {
-	module.exports = initify
-}
+module.exports = initify
